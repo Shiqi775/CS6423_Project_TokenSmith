@@ -54,6 +54,12 @@ class RAGConfig:
     extracted_index_path: os.PathLike = "data/extracted_index.json"
     page_to_chunk_map_path: os.PathLike = "index/sections/textbook_index_page_to_chunk_map.json"
 
+    # hot-chunk buffer pool (buffer pool management / LRU replacement analogy)
+    enable_hot_chunk_boost: bool = False
+    hot_cache_size: int = 50
+    hot_chunk_boost_alpha: float = 0.1
+    chunk_tracker_db: str = "data/chunk_access.db"
+
     # ---------- factory + validation ----------
     @classmethod
     def from_yaml(cls, path: os.PathLike) -> RAGConfig:

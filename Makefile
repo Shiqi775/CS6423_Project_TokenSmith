@@ -1,4 +1,4 @@
-.PHONY: help env build-llama clean test run-index run-chat install update-env
+.PHONY: help env build-llama clean test run-index run-chat install update-env analyze-hot-chunks test-hot-chunks
 
 help:
 	@echo "TokenSmith - RAG Application (Conda Dependencies)"
@@ -10,7 +10,9 @@ help:
 	@echo "  test        - Run tests"
 	@echo "  clean       - Clean build artifacts"
 	@echo "  show-deps   - Show installed conda packages"
-	@echo "  export-env  - Export current environment"
+	@echo "  export-env          - Export current environment"
+	@echo "  analyze-hot-chunks  - Print hot-chunk access report (DB=path optional)"
+	@echo "  test-hot-chunks     - Run hot-chunk performance tests"
 
 # Environment setup - installs all dependencies via conda
 env:
@@ -73,3 +75,13 @@ run-chat:
 	@echo "Note: Chat mode requires interactive terminal. If this fails, use:"
 	@echo "  conda activate tokensmith && python -m src.main chat $(ARGS)"
 	conda run --no-capture-output -n tokensmith --no-capture-output python -m src.main chat $(ARGS)
+
+# Hot-chunk buffer pool analysis
+analyze-hot-chunks:
+	@echo "Generating hot-chunk access report from $(DB)"
+	conda run -n tokensmith python -m src.instrumentation.chunk_tracker --report --db $(or $(DB),data/chunk_access.db)
+
+# Run hot-chunk performance tests only
+test-hot-chunks:
+	@echo "Running hot-chunk buffer pool performance tests..."
+	conda run -n tokensmith python -m pytest tests/test_hot_chunk_cache.py -v

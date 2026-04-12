@@ -5,7 +5,7 @@ This module supports ranking strategies applied after chunk retrieval.
 """
 
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # typedef Candidate as base, we might change this into a class later
 # Each candidate is identified by its global index into `chunks`
@@ -28,9 +28,24 @@ class EnsembleRanker:
         if active_weights != 1.0:
             raise ValueError(f"Weights for active retrivers must sum to 1.0. Current sum: {active_weights}")
 
-    def rank(self, raw_scores: Dict[str, Dict[Candidate, float]]) -> Tuple[List[int], List[float]]:
+    def rank(
+        self,
+        raw_scores: Dict[str, Dict[Candidate, float]],
+        boost_factors: Optional[Dict[int, float]] = None,
+        boost_alpha: float = 0.1,
+    ) -> Tuple[List[int], List[float]]:
         """
         Executes the rank fusion process on the provided raw scores.
+
+        Args:
+            raw_scores:    Per-retriever score dicts {retriever_name: {chunk_id: score}}.
+            boost_factors: Optional popularity boost per chunk_id in [0, 1].
+                           Derived from ChunkAccessTracker.get_boost_factors().
+                           Implements the buffer-pool analogy: frequently accessed
+                           chunks receive a small score uplift, similar to how a
+                           database buffer pool prioritises hot pages.
+            boost_alpha:   Magnitude of popularity boost (default 0.1).
+                           final_score = fused_score * (1 + boost_alpha * popularity)
         """
         # Collect scores from each active retriever
         per_retriever_scores: Dict[str, Dict[Candidate, float]] = {}
@@ -40,7 +55,6 @@ class EnsembleRanker:
                 per_retriever_scores[name] = raw_scores[name]
 
         # Fuse scores using the specified method
-        # Shahmeer: if there is only one retriever with weight > 0, just return its ordering, why call this function???
         if self.ensemble_method == "rrf":
             ordered_ids, ordered_scores = self._weighted_rrf_fuse(per_retriever_scores)
         elif self.ensemble_method == "linear":
@@ -48,7 +62,35 @@ class EnsembleRanker:
         else:
             raise NotImplementedError(f"Ranking method '{self.ensemble_method}' is not implemented.")
 
+        # Apply optional popularity boost (buffer-pool hot-page prioritisation)
+        if boost_factors and boost_alpha > 0:
+            ordered_ids, ordered_scores = self._apply_popularity_boost(
+                ordered_ids, ordered_scores, boost_factors, boost_alpha
+            )
+
         return ordered_ids, ordered_scores
+
+    def _apply_popularity_boost(
+        self,
+        ordered_ids: List[int],
+        ordered_scores: List[float],
+        boost_factors: Dict[int, float],
+        boost_alpha: float,
+    ) -> Tuple[List[int], List[float]]:
+        """
+        Re-score with a popularity multiplier and re-sort.
+
+        Formula:  boosted = fused * (1 + alpha * popularity)
+        where popularity = access_count / max_access_count  ∈ [0, 1].
+        """
+        boosted = []
+        for chunk_id, score in zip(ordered_ids, ordered_scores):
+            pop = boost_factors.get(chunk_id, 0.0)
+            boosted.append((chunk_id, score * (1.0 + boost_alpha * pop)))
+        boosted.sort(key=lambda x: x[1], reverse=True)
+        new_ids    = [int(x[0])   for x in boosted]
+        new_scores = [float(x[1]) for x in boosted]
+        return new_ids, new_scores
     
     def _weighted_rrf_fuse(self, per_retriever_scores: Dict[str, Dict[Candidate, float]]) -> Tuple[List[int], List[float]]:
         """Performs Weighted Reciprocal Rank Fusion."""

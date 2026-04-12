@@ -17,3 +17,9 @@ rerank_top_k: 5
 use_double_prompt: false
 enable_history: true
 max_history_turns: 3
+
+# Hot-chunk buffer pool (buffer pool management / LRU replacement analogy)
+enable_hot_chunk_boost: false
+hot_cache_size: 50
+hot_chunk_boost_alpha: 0.1
+chunk_tracker_db: "data/chunk_access.db"

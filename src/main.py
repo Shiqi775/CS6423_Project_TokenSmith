@@ -15,15 +15,16 @@ from src.config import RAGConfig
 from src.generator import answer, double_answer, dedupe_generated_text
 from src.index_builder import build_index
 from src.instrumentation.logging import get_logger
+from src.instrumentation.chunk_tracker import ChunkAccessTracker, HotChunkCache
 from src.ranking.ranker import EnsembleRanker
 from src.preprocessing.chunking import DocumentChunker
 from src.query_enhancement import generate_hypothetical_document, contextualize_query
 from src.retriever import (
-    filter_retrieved_chunks, 
-    BM25Retriever, 
-    FAISSRetriever, 
-    IndexKeywordRetriever, 
-    get_page_numbers, 
+    filter_retrieved_chunks,
+    BM25Retriever,
+    FAISSRetriever,
+    IndexKeywordRetriever,
+    get_page_numbers,
     load_artifacts
 )
 from src.ranking.reranker import rerank
@@ -135,23 +136,55 @@ def get_answer(
         # print(f"Retrieval query: {retrieval_query}")
         if cfg.use_hyde:
             retrieval_query = generate_hypothetical_document(question, cfg.gen_model, max_tokens=cfg.hyde_max_tokens)
-        
+
         pool_n = max(cfg.num_candidates, cfg.top_k + 10)
+
+        # --- HotChunkCache: pre-score hot chunks before full FAISS search ---
+        # Analogous to a database buffer pool: frequently accessed pages are
+        # kept in RAM and scored directly, bypassing the slower full index scan.
+        hot_scores: Dict[int, float] = {}
+        if artifacts.get("hot_cache"):
+            faiss_ret = next((r for r in retrievers if r.name == "faiss"), None)
+            if faiss_ret is not None:
+                q_vec = faiss_ret.embedder.encode([retrieval_query]).astype("float32")
+                hot_scores = artifacts["hot_cache"].get_hot_scores(q_vec)
+
         raw_scores: Dict[str, Dict[int, float]] = {}
         for retriever in retrievers:
             # print(f"Getting scores from retriever: {retriever.name}...")
             raw_scores[retriever.name] = retriever.get_scores(retrieval_query, pool_n, chunks)
-        # TODO: Fix retrieval logging.
 
-        # print("Raw scores from retrievers:")
-        # for retriever_name, score_dict in raw_scores.items():
-        #     print(f"  {retriever_name}: {list(score_dict.values())}")
-        # Step 2: Ranking
-        ordered, scores = ranker.rank(raw_scores=raw_scores)
+        # Merge hot-cache scores into FAISS scores.
+        # Hot chunks already have their similarity pre-computed from cached
+        # embeddings; their scores override/supplement FAISS search results.
+        if hot_scores:
+            raw_scores["faiss"] = {**raw_scores.get("faiss", {}), **hot_scores}
+
+        # --- Popularity boost (buffer-pool page-frequency analogy) ---
+        boost_factors: Dict[int, float] = {}
+        if cfg.enable_hot_chunk_boost and artifacts.get("tracker"):
+            all_candidates = list(
+                {cid for scores_dict in raw_scores.values() for cid in scores_dict}
+            )
+            boost_factors = artifacts["tracker"].get_boost_factors(all_candidates)
+
+        # Step 2: Ranking (with optional popularity boost)
+        ordered, scores = ranker.rank(
+            raw_scores=raw_scores,
+            boost_factors=boost_factors if boost_factors else None,
+            boost_alpha=cfg.hot_chunk_boost_alpha,
+        )
         # print(f"Ordered candidate indices after ranking: {ordered[:cfg.top_k]}")
         # print(f"Corresponding scores: {scores[:cfg.top_k]}")
         topk_idxs = filter_retrieved_chunks(cfg, chunks, ordered)
         ranked_chunks = [chunks[i] for i in topk_idxs]
+
+        # --- Log chunk accesses to SQLite (buffer-pool page-pin analogy) ---
+        # After each query, record which chunks were retrieved and their scores.
+        # This data drives HotChunkCache seeding and popularity boost.
+        if artifacts.get("tracker") and topk_idxs:
+            top_scores_log = scores[:len(topk_idxs)] if scores else [1.0] * len(topk_idxs)
+            artifacts["tracker"].log_access(topk_idxs, top_scores_log)
         # print(f"Top-{cfg.top_k} chunk indices after filtering: {topk_idxs}")
         # print("Len Ranked chunks:", len(ranked_chunks))
         # print("Example ranked chunk content:", ranked_chunks[0] if ranked_chunks else "No chunks retrieved")
@@ -294,6 +327,24 @@ def run_chat_session(args: argparse.Namespace, cfg: RAGConfig):
         ranker = EnsembleRanker(ensemble_method=cfg.ensemble_method, weights=cfg.ranker_weights, rrf_k=int(cfg.rrf_k))
         print("Loaded retrievers and initialized ranker.")
         artifacts = {"chunks": chunks, "sources": sources, "retrievers": retrievers, "ranker": ranker, "meta": meta}
+
+        # --- Hot-chunk buffer pool initialisation ---
+        if cfg.enable_hot_chunk_boost:
+            tracker = ChunkAccessTracker(cfg.chunk_tracker_db)
+            faiss_ret = next((r for r in retrievers if r.name == "faiss"), None)
+            if faiss_ret is not None:
+                hot_cache = HotChunkCache(
+                    tracker, chunks, faiss_ret.embedder, n=cfg.hot_cache_size
+                )
+                artifacts["tracker"]   = tracker
+                artifacts["hot_cache"] = hot_cache
+                print(
+                    f"Hot-chunk cache enabled: {hot_cache.cache_size} chunks preloaded "
+                    f"(db={cfg.chunk_tracker_db})."
+                )
+            else:
+                artifacts["tracker"] = tracker
+                print("ChunkAccessTracker enabled (no FAISS retriever found for hot cache).")
     except Exception as e:
         print(f"ERROR: {e}. Run 'index' mode first.")
         sys.exit(1)
