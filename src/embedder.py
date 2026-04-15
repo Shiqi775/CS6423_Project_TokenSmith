@@ -5,17 +5,17 @@ import multiprocessing.pool
 import numpy as np
 from pathlib import Path
 from typing import List, Union, Optional
-from llama_cpp import Llama
 from tqdm import tqdm
 
 # Global variables for worker processes
-_worker_model: Optional[Llama] = None
+_worker_model = None
 _worker_embedding_dim: int = 0
 
 def _init_worker(model_path: str, n_ctx: int, n_threads: int):
     """
     Initializes the model inside a worker process.
     """
+    from llama_cpp import Llama  # lazy: not available in CI without native build
     global _worker_model, _worker_embedding_dim
 
     _worker_model = Llama(
@@ -70,6 +70,7 @@ class SentenceTransformer:
         self._is_gguf = model_path.endswith('.gguf')
 
         if self._is_gguf:
+            from llama_cpp import Llama  # lazy: not available in CI without native build
             self.model = Llama(
                 model_path=model_path,
                 n_ctx=n_ctx,

@@ -1,5 +1,4 @@
 import textwrap, re
-from llama_cpp import Llama
 
 ANSWER_START = "<<<ANSWER>>>"
 ANSWER_END   = "<<<END>>>"
@@ -113,6 +112,7 @@ def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor"
 _LLM_CACHE = {}
 
 def get_llama_model(model_path: str, n_ctx: int = 8192):
+    from llama_cpp import Llama  # lazy: not available in CI without native build
     if model_path not in _LLM_CACHE:
         try:
             _LLM_CACHE[model_path] = Llama(model_path=model_path,
