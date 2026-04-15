@@ -79,7 +79,9 @@ def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor"
     if chunks and len(chunks) > 0:
         if isinstance(chunks[0], tuple):
             chunks = [c[0] for c in chunks]
-        context = "\n\n".join(chunks)
+        # Truncate each chunk to max_chunk_chars so the prompt fits in the context window
+        truncated = [c[:max_chunk_chars] for c in chunks]
+        context = "\n\n".join(truncated)
         context = text_cleaning(context)
         
         # Build prompt with chunks
@@ -110,7 +112,7 @@ def format_prompt(chunks, query, max_chunk_chars=400, system_prompt_mode="tutor"
 
 _LLM_CACHE = {}
 
-def get_llama_model(model_path: str, n_ctx: int = 4096):
+def get_llama_model(model_path: str, n_ctx: int = 8192):
     if model_path not in _LLM_CACHE:
         try:
             _LLM_CACHE[model_path] = Llama(model_path=model_path,
@@ -150,8 +152,8 @@ def run_llama_cpp(prompt: str, model_path: str, max_tokens: int, temperature: fl
         stop=[ANSWER_END]
     )
 
-def answer(query: str, chunks, model_path: str, max_tokens: int = 300, system_prompt_mode: str = "tutor", temperature: float = 0.2):
-    prompt = format_prompt(chunks, query, system_prompt_mode=system_prompt_mode)
+def answer(query: str, chunks, model_path: str, max_tokens: int = 300, system_prompt_mode: str = "tutor", temperature: float = 0.2, max_chunk_chars: int = 1200):
+    prompt = format_prompt(chunks, query, max_chunk_chars=max_chunk_chars, system_prompt_mode=system_prompt_mode)
     return stream_llama_cpp(prompt, model_path, max_tokens=max_tokens, temperature=temperature)
 
 def double_answer(query: str, chunks, model_path: str,

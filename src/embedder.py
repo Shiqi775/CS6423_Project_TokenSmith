@@ -54,28 +54,36 @@ def _encode_batch_worker(texts: List[str]) -> List[List[float]]:
 class SentenceTransformer:
     def __init__(self, model_path: str, n_ctx: int = 4096, n_threads: int = None):
         """
-        Initialize with a local GGUF model file path.
-        
+        Initialize with either a local GGUF file path or a HuggingFace model name.
+
+        If model_path ends with '.gguf', uses llama-cpp-python for inference.
+        Otherwise, uses the sentence-transformers library (much faster on CPU).
+
         Args:
-            model_path: Path to your local .gguf file
-            n_ctx: Context window size (increased to match Qwen3 training context)
-            n_threads: Number of threads to use (None = auto-detect)
+            model_path: Path to a .gguf file OR a HuggingFace model name (e.g. 'BAAI/bge-base-en-v1.5')
+            n_ctx: Context window size (only used for GGUF models)
+            n_threads: Number of threads (only used for GGUF models; None = auto-detect)
         """
         self.model_path = model_path
         self.n_ctx = n_ctx
-        
-        self.model = Llama(
-            model_path=model_path,
-            n_ctx=n_ctx,
-            n_threads=n_threads,
-            embedding=True,
-            verbose=True,
-            use_mmap=True,
-            n_gpu_layers=-1 # use GPU if available
-        )
         self._embedding_dimension = None
-        
-        _ = self.embedding_dimension
+        self._is_gguf = model_path.endswith('.gguf')
+
+        if self._is_gguf:
+            self.model = Llama(
+                model_path=model_path,
+                n_ctx=n_ctx,
+                n_threads=n_threads,
+                embedding=True,
+                verbose=True,
+                use_mmap=True,
+                n_gpu_layers=-1
+            )
+            _ = self.embedding_dimension
+        else:
+            import sentence_transformers as _st
+            self.model = _st.SentenceTransformer(model_path)
+            self._embedding_dimension = self.model.get_sentence_embedding_dimension()
 
     @property
     def embedding_dimension(self) -> int:
@@ -85,31 +93,43 @@ class SentenceTransformer:
             self._embedding_dimension = len(test_embedding)
         return self._embedding_dimension
 
-    def encode(self, 
-           texts: Union[str, List[str]], 
-           batch_size: int = 16,  # Adjusted for 4B model
+    def encode(self,
+           texts: Union[str, List[str]],
+           batch_size: int = 32,
            normalize: bool = False,
            show_progress_bar: bool = False,
            **kwargs) -> np.ndarray:
-
         """
-        Encode texts to embeddings with batch processing.
-        
+        Encode texts to embeddings.
+
         Args:
             texts: Single text or list of texts to encode
             batch_size: Number of texts to process at once
-            normalize: Whether to normalize embeddings
-            show_progress_bar: Whether to show progress bar
-            Returns:
+            normalize: Whether to L2-normalize embeddings
+            show_progress_bar: Whether to show a progress bar
+        Returns:
             numpy.ndarray: Float32 embeddings array
         """
         if isinstance(texts, str):
             texts = [texts]
-            
+
         if not texts:
             return np.array([], dtype=np.float32).reshape(0, -1)
-        
-        # Process in batches
+
+        if not self._is_gguf:
+            # sentence-transformers path — fast, batched, native progress bar
+            vecs = self.model.encode(
+                texts,
+                batch_size=batch_size,
+                show_progress_bar=show_progress_bar,
+                convert_to_numpy=True,
+            ).astype(np.float32)
+            if normalize:
+                norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+                vecs = vecs / np.where(norms == 0, 1e-12, norms)
+            return vecs
+
+        # llama-cpp (GGUF) path — process in batches
         embeddings = []
         num_batches = (len(texts) + batch_size - 1) // batch_size
 
@@ -117,28 +137,22 @@ class SentenceTransformer:
             start_idx = i * batch_size
             end_idx = min((i + 1) * batch_size, len(texts))
             batch_texts = texts[start_idx:end_idx]
-            
+
             try:
-                # IMPORTANT CHANGE: Pass the entire LIST to the model at once.
-                # This triggers the native C++/Metal batch processing logic.
                 response = self.model.create_embedding(batch_texts)
-                
-                # Extract the list of embedding vectors from the response
                 batch_embeddings = [item['embedding'] for item in response['data']]
                 embeddings.extend(batch_embeddings)
-                
             except Exception as e:
                 print(f"Error encoding batch: {e}")
-                # Fallback: encode one by one if batch fails, or append zeros
                 for _ in batch_texts:
                     embeddings.append([0.0] * self.embedding_dimension)
-                
+
         vecs = np.array(embeddings, dtype=np.float32)
-        
-        if normalize: # do L2 normalization
+
+        if normalize:
             norms = np.linalg.norm(vecs, axis=1, keepdims=True)
             vecs = vecs / np.where(norms == 0, 1e-12, norms)
-            
+
         return vecs
 
     def get_sentence_embedding_dimension(self) -> int:

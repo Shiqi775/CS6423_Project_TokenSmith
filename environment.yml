@@ -15,7 +15,7 @@ dependencies:
   # Use pip only for packages not in conda or needing special compilation
   - pip:
     - faiss-cpu
-    - llama-cpp-python  # Needs CMAKE_ARGS for Metal/CUDA
+    # llama-cpp-python installed separately after env creation (see README)
     - pyyaml
     - tqdm
     - nltk
